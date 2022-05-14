@@ -1,4 +1,4 @@
-package com.mine.study.socket;
+package com.mine.study.server;
 
 import cn.dev33.satoken.exception.SaTokenException;
 import cn.dev33.satoken.stp.StpUtil;

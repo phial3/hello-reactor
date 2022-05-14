@@ -33,7 +33,8 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer, WebSoc
                 .addHandler(new MyWebSocketHandler(), "/ws-connect")
                 // WebSocket 拦截器
                 .addInterceptors(new MyWebSocketInterceptor())
-                // 允许跨域
+                // 添加拦截处理
+                .setHandshakeHandler(new MyHandshakeHandler())
                 .setAllowedOrigins("*");
     }
 
@@ -116,7 +117,8 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer, WebSoc
          * 2. maxPoolSize 配置线程池最大数，当线程池数等于此配置时，不会产生新线程
          * 3. keepAliveSeconds 线程池维护线程所允许的空闲时间，单位秒
          */
-        registration.taskExecutor().corePoolSize(10)
+        registration.taskExecutor()
+                .corePoolSize(10)
                 .maxPoolSize(20)
                 .keepAliveSeconds(60);
         registration.interceptors(new WebSocketUserInterceptor());
@@ -129,7 +131,8 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer, WebSoc
      */
     @Override
     public void configureClientOutboundChannel(ChannelRegistration registration) {
-        registration.taskExecutor().corePoolSize(10)
+        registration.taskExecutor()
+                .corePoolSize(10)
                 .maxPoolSize(20)
                 .keepAliveSeconds(60);
     }

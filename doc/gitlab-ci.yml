@@ -1,0 +1,690 @@
+stages:
+  - build
+  - package
+  - deploy
+
+workflow:
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /NS/'
+    - if: $NS
+
+before_script:
+  - |
+    [ -z "$NS" ] && CI_COMMIT_MESSAGE_NS=$(echo $CI_COMMIT_MESSAGE|awk -F"NS[.|' '|=]" '{print $2}'|sed 's/= //g') && NS=$(eval echo ${CI_COMMIT_MESSAGE_NS//./})
+    [ -z "$NS" ] && echo "最后一次 CI_COMMIT_MESSAGE 中带关键字: NS.dev 即可将此次 push 部署到 dev 环境,Run pipeline 页面添加变量 NS = dev 即可将此次 push 部署到 dev 环境"
+    [ -z "$NS" ] && echo "======= No namespace,nothing to do =======" && exit 1
+    [ -n "$KUBE" ] && [ -z "$(find $ROOT_CONFIG/K8S -maxdepth 1 -type d -name $KUBE)" ] && echo "======= No kubernetes,nothing to do =======" && exit 1
+    M_MODULE=$(echo $MAVEN_PL|awk '{print $NF}')
+    CI_PROJECT_NAME=$(echo $CI_PROJECT_NAME|tr '[A-Z'] '[a-z]')
+    CI_COMMIT_REF_NAME=$(echo ${CI_COMMIT_REF_NAME//\//-}|tr ['A-Z'] ['a-z'])
+    CI_PROJECT_NAMESPACE=$(echo ${CI_PROJECT_NAMESPACE//\//-}|tr '[a-z'] '[A-Z]')
+
+utils:
+  stage: build
+  image: $IMAGE_REGISTRY_SERVER/base/alpine:curl
+  tags:
+    - runner-k8s
+  script:
+    - |
+      [ -d $ROOT_CONFIG/commit ] || mkdir -p $ROOT_CONFIG/commit
+      [ ! -z "$CPL" ] || [ ! -z "$DEL" ] || [ ! -e $ROOT_CONFIG/commit/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_COMMIT_SHORT_SHA-$M_MODULE ] && export COMMENT="开始编译"
+      source $ROOT_CONFIG/bin/start.sh
+      find $ROOT_CONFIG/commit/ -type f -mtime +30 -delete
+      find $ROOT_CONFIG/.state/ -mtime +3 | xargs rm -rf
+      find $ROOT_CONFIG/.package/ -mtime +30 | xargs rm -rf
+      find $ROOT_CONFIG/.package/ -name "*-[0-9]*" -mtime +3 | xargs rm -rf
+      find $ROOT_CONFIG/.package/ -type f -name "*-sources*.[jw]ar" -delete
+      echo -e "\033[1;35m$NS\033[0m"
+      echo -e "\033[1;35mMAVEN_PL:$MAVEN_PL\033[0m"
+      [ -n "$KUBE" ] && [ -n "$(find $ROOT_CONFIG/K8S -maxdepth 1 -type d -name $KUBE)" ] && echo -e "\033[1;35m$KUBE\033[0m"||exit 0
+
+build:
+  stage: build
+  image: $IMAGE_REGISTRY_SERVER/base/$IMAGE_BUILD
+  tags:
+    - runner-k8s
+  script:
+    - |
+      ROOT_NS=$(find $ROOT_CONFIG/K8S -maxdepth 2 -type d -name $(echo $NS|awk '{print $1}')|tail -n 1 2>/dev/null)
+      MAVEN_PL=$([[ -n "$MAVEN_PL" && "$MAVEN_PL" != *-pl* ]] && echo "-pl $MAVEN_PL" || echo "$MAVEN_PL")  # 确保参数中有-pl
+      [ -d $ROOT_CONFIG/commit ] || mkdir -p $ROOT_CONFIG/commit
+      [ -z "$ROOT_NS" ] && echo "======= No namespace,nothing to do =======" && exit 1
+      [ -z "$CPL" ] && [ -z "$DEL" ] || rm -f $ROOT_CONFIG/commit/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_COMMIT_SHORT_SHA-$M_MODULE
+      [ -n "$PACK" ] && rm -f $ROOT_CONFIG/commit/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_COMMIT_SHORT_SHA-$M_MODULE
+      if [ -d $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME ];then
+        find $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME/ -name "*\.[jw]ar"|egrep ".*" &>/dev/null || rm -f $ROOT_CONFIG/commit/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_COMMIT_SHORT_SHA-$M_MODULE
+      else
+        rm -f $ROOT_CONFIG/commit/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_COMMIT_SHORT_SHA-$M_MODULE
+      fi
+      [ -e $ROOT_CONFIG/commit/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_COMMIT_SHORT_SHA-$M_MODULE ] && exit 0
+
+      /bin/cp -r $ROOT_CONFIG/.m2 ~/
+      source /etc/profile
+      # 编译
+      echo -e "\033[1;35m$NS\033[0m"
+      echo -e "\033[1;35mIMAGE:$IMAGE_BUILD\033[0m"
+      echo -e "\033[1;35mMAVEN_PL:$MAVEN_PL\033[0m"
+      echo "compiling...{user:`whoami`, workspace:`pwd`, project:$CI_PROJECT_NAME, branch:$CI_COMMIT_REF_NAME}"
+      echo "mvn clean package -U -am $MAVEN_PL $TEST_SKIP $SCAN2SONAR $DEPENDENCY_CHECK -Dmaven.compiler.source=1.8 -Dmaven.compiler.target=1.8"
+      mvn clean package -U -am $MAVEN_PL $TEST_SKIP $SCAN2SONAR $DEPENDENCY_CHECK -Dmaven.compiler.source=1.8 -Dmaven.compiler.target=1.8
+
+      # 所有编译生成的模块包移到当前路径target
+      mkdir -p ./target
+      for target in $(find . -maxdepth 3 -mindepth 2 -type d -name target); do
+        /bin/cp -r $target .
+      done
+
+      # 若该应用的target生成目录比较特殊,则用特殊列表来查找,并复制到当前目录
+      if [ -e $ROOT_CONFIG/.target ]; then
+        for line in $(cat $ROOT_CONFIG/.target); do
+          [ -d $line ] && /bin/cp -r $line .
+        done
+      fi
+
+      # 包名大写全部转成小写,因为docker仓库不支持使用大写字母
+      for file in $(find ./target -maxdepth 2 -type f | grep -P '\.[wj]ar$' | grep -P '[A-Z]'); do
+        mv $file `echo $file | tr 'A-Z' 'a-z'`
+      done
+
+      # 删除掉小于20M的多余的包(多半是未经处理,也不会投入使用的包),这里最好和开发部门沟通约定处理
+      find ./target -maxdepth 2 -type f -size -20M -delete
+
+      # 删除 *-sources.[jw]ar
+      find ./target -type f -name "*-sources*.[jw]ar" -delete
+
+      # 重命名,移除版本号
+      regexp='\-[0-9]+(\.[0-9]+)*'
+      for pack in $(ls target/ | egrep "$regexp"); do
+        pack_remove_version_number=${pack//$(echo $pack | egrep -o "$regexp")/}
+        [ -e ./target/$pack_remove_version_number ] && continue
+        echo "重命名,移除版本号:$pack -> $pack_remove_version_number"
+        mv ./target/$pack ./target/$pack_remove_version_number
+      done
+
+      # 删除命名不规范的包名:命名中不能包含点号'.',也不能包含snapshot
+      for pack in $(ls target/ | egrep '([.].*[.][wj]ar$)|(snapshot)'); do
+        echo "删除命名不规范的包:$pack" && rm -f target/$pack
+      done
+
+      # 删除需要忽略的包 /cache/sys/.ignore/*.[jw]ar
+      for file in $(find $ROOT_CONFIG/.ignore/ -type f | awk -F "/" '{print $NF}'); do
+        find ./target -name $file -delete
+      done
+
+      # 清理废弃 WAR 包,比如一个应用同时编译生成了 $NAME.jar 和 $NAME.war,需要清理 WAR
+      if find ./target -maxdepth 2 -name "*.jar"|egrep '.*' &>/dev/null && find ./target -maxdepth 2 -name "*.war"|egrep '.*' &>/dev/null;then
+        find ./target -maxdepth 2 -name "*.war" -delete
+        echo -e "\033[1;32m清理废弃 WAR 包\033[0m"
+      fi
+
+      # 若编译并未生成包,或者所有包均不符合规范,则退出
+      find target/ -maxdepth 2 -name "*\.[jw]ar"|egrep ".*" &>/dev/null || exit 1
+
+      # 存储package名称,防止缓存失效,deploy步骤出错的问题
+      mkdir -p $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_PIPELINE_ID
+      mkdir -p $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME
+      [ -n "$M_MODULE" ] && mkdir -p $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$M_MODULE
+      for file in $(ls target/*.[jw]ar); do
+        touch $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_PIPELINE_ID/$(echo $file | awk -F"/" '{print $NF}')
+        touch $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME/$(echo $file | awk -F"/" '{print $NF}')
+        [ -n "$M_MODULE" ] && touch $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$M_MODULE/$(echo $file | awk -F"/" '{print $NF}')
+        # 指定发布某个package（移除非匹配的包）
+        [ -n "$PACK" ] && find $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_PIPELINE_ID -type f ! -name $PACK -delete
+        [ -n "$PACK" ] && find $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME -type f ! -name $PACK -delete
+      done
+
+      MSG="[PACKAGES]:\n$(ls -lha ./target | grep -P '\.[wj]ar$')"
+      echo -e "\033[1;35m$MSG\033[0m"
+
+      for i in `find ./target -maxdepth 2 -name "*.[jw]ar"`;do md5sum $i;done
+      ls -lha ./target | grep -P '\.[wj]ar$' >> $ROOT_CONFIG/.java-list
+  cache:
+    paths:
+      - target/*.[jw]ar
+    key: "$CI_PROJECT_NAME-$CI_PIPELINE_ID"
+
+package:
+  image: $IMAGE_REGISTRY_SERVER/base/docker:19.03.12-git
+  stage: package
+  tags:
+    - runner-k8s
+  services:
+    - docker:19.03-dind
+  needs: [build]
+  when: on_success
+  script:
+    - |
+      find ./target/ -type f|egrep '.*' &>/dev/null || exit 0
+      mkdir ~/.docker && echo "$DOCKER_AUTH_CONFIG" > ~/.docker/config.json
+
+      # 自定义push的镜像仓库
+      ROOT_NS=$(find $ROOT_CONFIG/K8S -maxdepth 2 -type d -name $(echo $NS|awk '{print $1}')|tail -n 1 2>/dev/null)
+      ROOT_K8S=$(dirname $ROOT_NS)
+      PUSH_IMAGE_REGISTRY_NAMESPACE=$ROOT_K8S/.kube/push_image_registry_namespace
+      PULL_IMAGE_REGISTRY_NAMESPACE=$ROOT_K8S/.kube/pull_image_registry_namespace
+      IMAGE_REGISTRY=$([ -e $PUSH_IMAGE_REGISTRY_NAMESPACE ] && cat $PUSH_IMAGE_REGISTRY_NAMESPACE || echo $IMAGE_REGISTRY_SERVER/$IMAGE_REGISTRY_NAMESPACE )
+
+      # 遍历target里面的所有包,把它们都生成镜像并推送到主镜像仓库
+      for pack in $(ls target/)
+      do
+          cp -f target/$pack ./ROOT.${pack##*.}
+          IMAGE_NAME=$IMAGE_REGISTRY/${pack%.*}
+          NAME=${pack%.*}
+
+          # 默认寻找该项目的自定义 Dockerfile ,没有自定义则使用统一模版,这里只是单纯的一个包镜像,在部署阶段和基础环境镜像组合一起完成应用的启动(自定义 Dockerfile 的应用有的时候也需要自定义模版)
+          if [ -e $ROOT_CONFIG/Dockerfile/.$NAME-Dockerfile ];then
+            file=$ROOT_CONFIG/Dockerfile/.$NAME-Dockerfile
+          else
+            file=$ROOT_CONFIG/Dockerfile/Dockerfile-${pack##*.}-busybox
+          fi
+          cp $file ./Dockerfile
+          docker build -t ${pack%.*}:$CI_COMMIT_REF_NAME -f ./Dockerfile .
+          docker tag ${pack%.*}:$CI_COMMIT_REF_NAME $IMAGE_NAME:$CI_COMMIT_SHORT_SHA
+          docker tag ${pack%.*}:$CI_COMMIT_REF_NAME $IMAGE_NAME:$CI_COMMIT_SHORT_SHA-$CI_COMMIT_REF_NAME
+          docker push $IMAGE_NAME:$CI_COMMIT_SHORT_SHA
+          docker push $IMAGE_NAME:$CI_COMMIT_SHORT_SHA-$CI_COMMIT_REF_NAME
+
+          [ -d $ROOT_CONFIG/commit ] || mkdir -p $ROOT_CONFIG/commit
+          touch $ROOT_CONFIG/commit/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_COMMIT_SHORT_SHA-$NAME
+          touch $ROOT_CONFIG/commit/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_COMMIT_SHORT_SHA-$M_MODULE
+          # 标记镜像已经创建
+          touch $ROOT_CONFIG/commit/$NAME:$CI_COMMIT_SHORT_SHA
+      done
+
+      docker images
+      echo -e "\033[1;35m$(cat ./Dockerfile)\033[0m"
+
+      # push到一个中央主仓库,然后根据配置的全球各地域镜像同步规则触发从仓库镜像同步,为了保障各地域本地拉取更新镜像,所以等待30秒(当pull和push地址中地域一致说明都是在主仓库,则不需要等待)
+      [ -e $PUSH_IMAGE_REGISTRY_NAMESPACE ] && PUSH_IMAGE_REGISTRY=$(cat $PUSH_IMAGE_REGISTRY_NAMESPACE) || PUSH_IMAGE_REGISTRY=$IMAGE_REGISTRY_SERVER/$IMAGE_REGISTRY_NAMESPACE
+      [ -e $PULL_IMAGE_REGISTRY_NAMESPACE ] && PULL_IMAGE_REGISTRY=$(cat $PULL_IMAGE_REGISTRY_NAMESPACE) || PULL_IMAGE_REGISTRY=$IMAGE_REGISTRY_SERVER/$IMAGE_REGISTRY_NAMESPACE
+      [ "$PUSH_IMAGE_REGISTRY" = "$PULL_IMAGE_REGISTRY" ] || [ "$IMAGE_REGISTRY_SERVER/$IMAGE_REGISTRY_NAMESPACE" = "$PULL_IMAGE_REGISTRY" ] || sleep 81
+
+  cache:
+    paths:
+      - target/*.[jw]ar
+    key: "$CI_PROJECT_NAME-$CI_PIPELINE_ID"
+
+deploy:
+  image: $IMAGE_REGISTRY_SERVER/base/kubectl
+  stage: deploy
+  tags:
+    - runner-k8s
+  when: on_success
+  script:
+    - |
+      # 发布到1个或者n个namespace
+      echo -e "\033[1;35m$NS\033[0m"
+      date "+%F %T"
+      NNS=$NS
+      parallelism=0
+      for NS in $NS
+      do
+          # 获取该项目所属的命名空间路径,同一个命名空间可能在多个k8s里都有,被认为是多节点部署;如果传递了变量 $KUBE,则表示此次发布只在该集群发布(定向发布)
+          if [ -n "$KUBE" ]; then
+            ALL_ROOT_NS=$(find $ROOT_CONFIG/K8S/$KUBE -maxdepth 1 -type d -name $NS)
+          else
+            ALL_ROOT_NS=$(find $ROOT_CONFIG/K8S -maxdepth 2 -type d -name $NS)
+          fi
+          for ROOT_NS in $ALL_ROOT_NS
+          do
+            [ -d $ROOT_NS/.kube ] || mkdir -p $ROOT_NS/.kube
+            [ -e $ROOT_NS/.kube/.ban ] && echo -e "\033[1;32m===================== 暂时禁止在 $ROOT_NS 发布 =====================\033[0m" && continue
+
+            if [ -e $ROOT_NS/.allow ];then
+              if ! find $ROOT_NS/.allow -name $GITLAB_USER_NAME|egrep '.*' &>/dev/null;then
+                echo -e "\033[1;32m===================== $GITLAB_USER_NAME 没有 $NS 的直接发布权限,请使用 shark 平台发布 =====================\033[0m" && exit 1
+              fi
+            fi
+
+            NS_NUM=$(($NS_NUM+1))
+            export ROOT_K8S=$(dirname $ROOT_NS)
+            [ -e $ROOT_K8S/.kube/secret_kubeconfig ] || ( echo -e "\033[1;32m=== 请SRE确认生成 $ROOT_K8S/.kube/secret_kubeconfig 文件 ===\033[0m" && exit 1 )
+            for i in secret configmap;do [ -d $ROOT_K8S/.kube/$i ] || mkdir -p $ROOT_K8S/.kube/$i;done
+            for i in deployment statefulset daemonset service ingress secret configmap cronjob pv pvc;do [ -d $ROOT_NS/$i ] || mkdir -p $ROOT_NS/$i;done
+            [ -e $ROOT_NS/.kube/default_localtime ] || cp $ROOT_CONFIG/K8S/.kube/default_localtime $ROOT_NS/.kube/
+            [ -e $ROOT_NS/.kube/default_replicas ] || cp $ROOT_CONFIG/K8S/.kube/default_replicas $ROOT_NS/.kube/
+            [ -e $ROOT_NS/.kube/replicas ] || cp $ROOT_CONFIG/K8S/.kube/replicas $ROOT_NS/.kube/
+            [ -e $ROOT_NS/.kube/default_jvm ] || cp $ROOT_CONFIG/K8S/.kube/default_jvm $ROOT_NS/.kube/
+            [ -e $ROOT_NS/.kube/jvm ] || cp $ROOT_CONFIG/K8S/.kube/jvm $ROOT_NS/.kube/
+            [ -d $HOME/.kube ] || mkdir $HOME/.kube && cat $ROOT_K8S/.kube/secret_kubeconfig|openssl aes-256-cbc -d -salt -pbkdf2 -k $SALT|base64 -d > $HOME/.kube/config
+            cp $HOME/.kube/config $HOME/.kube/$NS
+
+            # 获取待发布的 namespace 所在 k8s 自定义的拉取镜像仓库地址和镜像仓库根地址
+            PULL_IMAGE_REGISTRY_NAMESPACE=$ROOT_K8S/.kube/pull_image_registry_namespace
+
+            export K8S=$(echo $ROOT_K8S|awk -F'/' '{print $NF}')
+            export NS=$NS
+            export ZONE=$(echo $NS|awk -F"-" '{print $NF}')
+            export IMAGE_REGISTRY=$( [ -e $PULL_IMAGE_REGISTRY_NAMESPACE ] && cat $PULL_IMAGE_REGISTRY_NAMESPACE || echo $IMAGE_REGISTRY_SERVER/$IMAGE_REGISTRY_NAMESPACE )
+            export IMAGE_REGISTRY_ROOT=$(echo $IMAGE_REGISTRY|awk -F"/" '{print $1}')
+            export REPLICAS=$( [ -e $ROOT_NS/.kube/default_replicas ] && cat $ROOT_NS/.kube/default_replicas || echo 1 )
+
+            echo "======================================================================================================"
+
+            # 检查目标 k8s 镜像拉取/推送配置文件
+            for i in pull_image_registry_namespace push_image_registry_namespace
+            do
+                [ -e $ROOT_K8S/.kube/$i ] || ( cp $ROOT_CONFIG/K8S/.kube/$i $ROOT_K8S/.kube/$i && echo -e "\033[1;35m复制镜像配置文件 $ROOT_CONFIG/K8S/.kube/$i 到 $ROOT_K8S/.kube/$i\033[0m" )
+            done
+
+            # 创建 namespace (如果要创建新环境,CI/CD 流程唯一需要做的事情就是在 K8S 目录所属的目标k8s创建同名空目录)
+            file=$ROOT_NS/.$NS-NAMESPACE.yml
+            namespace=$ROOT_CONFIG/K8S/.kube/.NAMESPACE.tmpl
+            [ -e $file ] || (envsubst '{{$NS}}' < $namespace | kubectl apply -f -;envsubst '{{$NS}}' < $namespace > $file;sleep 7)
+
+            # 写入适用于当前 namespace 的pv/pvc资源,写入适用于当前k8s下每个namemspace的pv/pvc资源(如果同名模版资源,则以当前 namespace 为准),另外写入一个 pv-share.yml 和 pvc-share.yml 作为当前 k8s 里各个 namespace 都可以访问的存储;也就是说一个 namespace 里有一个同名的独享存储,也有一个 $namespace-share 名称的共享存储,可以把有公共的基础数据或者基础外部工具整个 k8s 共享使用,而只需要在 namespace 范围的数据就是独享使用,每个 namespace 一个独享 pv , 一个独享 pvc, 还有一个共享 pvc (关联共享pv)
+            for ROOT_PATH in $ROOT_NS $ROOT_K8S/.kube
+            do
+                for i in pv pvc
+                do
+                    dir=$ROOT_PATH/$i
+                    [ -d $dir ] || mkdir -p $dir
+                    for j in $(find $dir -type f -name ".*.tmpl")
+                    do
+                        file_name=$(echo ${j%.*}.yml|awk -F"/" '{print $NF}')
+                        file_name=${file_name/./}
+                        file=$ROOT_NS/$i/$file_name
+                        [ -e $file ] || (envsubst '{{$NS,$K8S}}' < $j | kubectl apply -f -;envsubst '{{$NS,$K8S}}' < $j > $file)
+                    done
+                done
+            done
+
+            # 写入适用于每个k8s的公共secret/configmap信息,写入适用于当前k8s下每个namemspace的公共secret/configmap,写入适用于当前namespace的私有secret/configmap信息
+            for ROOT_PATH in $ROOT_CONFIG/K8S/.kube $ROOT_K8S/.kube $ROOT_NS
+            do
+                for i in secret configmap
+                do
+                    dir=$ROOT_PATH/$i
+                    [ -d $dir ] || mkdir -p $dir
+                    for j in $(find $dir -type f -name ".*.tmpl")
+                    do
+                        file_name=$(echo ${j%.*}.yml|awk -F"/" '{print $NF}')
+                        file_name=${file_name/./}
+                        file=$ROOT_NS/$i/$file_name
+                        [ -e $file ] && [ "$(cat $file)" = "$(envsubst '{{$NS,$K8S}}' < $j)" ] || (envsubst '{{$NS,$K8S}}' < $j | kubectl apply -f -;envsubst '{{$NS,$K8S}}' < $j > $file)
+                    done
+                done
+            done
+
+            # 如果当前 namespace 目录没有模版文件,则复制初始模版作为新环境的初始模版文件,优先寻找所属 k8s 模版,所属 k8s 没有定义模版,则复制初始模版
+            for ROOT_PATH in $ROOT_K8S/.kube $ROOT_CONFIG/K8S/.kube
+            do
+                for i in deployment statefulset daemonset service ingress
+                do
+                    dir=$ROOT_PATH/$i
+                    [ -d $dir ] || mkdir -p $dir
+                    for j in $(find $dir -type f -name ".*.tmpl")
+                    do
+                        [ -e $ROOT_NS/$i/$(echo $j|awk -F"/" '{print $NF}') ] || ( cp $j $ROOT_NS/$i/ && echo -e "\033[1;35m复制初始模版 $j 到 $ROOT_NS/$i/\033[0m" )
+                    done
+                done
+            done
+
+            # 自动创建 $name-debug 用于日常 Debug 容器,并挂载 /media/pv/$NS (所属 namespace 独享数据的 pv) 和 /media/pv/share (所属当前 k8s 共享数据的 pv)
+            for ROOT_PATH in $ROOT_K8S/.kube $ROOT_CONFIG/K8S/.kube
+            do
+                for i in deployment
+                do
+                    dir=$ROOT_PATH/$i
+                    [ -d $dir ] || mkdir -p $dir
+                    for j in $(find $dir -type f -name ".*-DEBUG.tmpl" -o -name ".*-SYS.tmpl")
+                    do
+                        file_name=$(echo ${j%.*}.yml|awk -F"/" '{print $NF}')
+                        file_name=${file_name/./}
+                        file=$ROOT_NS/$i/$file_name
+                        [ -e $file ] || (envsubst '{{$NS,$K8S,$IMAGE_REGISTRY_ROOT}}' < $j | kubectl apply -f -;envsubst '{{$NS,$K8S,$IMAGE_REGISTRY_ROOT}}' < $j > $file)
+                    done
+                done
+            done
+
+            if [ -d $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_PIPELINE_ID ];then
+
+              if find $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_PIPELINE_ID -name "*.jar"|egrep '.*' &>/dev/null && find $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_PIPELINE_ID -name "*.war"|egrep '.*' &>/dev/null;then
+                find $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_PIPELINE_ID -name "*.war" -delete
+                echo -e "\033[1;32m清理废弃 WAR 包\033[0m"
+              fi
+
+              echo $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_PIPELINE_ID
+              PACKAGES=$(ls $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_PIPELINE_ID/|tr -s '\n' ' ')
+            elif [ ! -z "$M_MODULE" ];then
+              if [ -d $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$M_MODULE ];then
+                N_MODULE=$(find $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$M_MODULE/ -type f|wc -l)
+                if [ $N_MODULE -gt 0 ];then
+                  echo $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$M_MODULE
+
+                  if find $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$M_MODULE -name "*.jar"|egrep '.*' &>/dev/null && find $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$M_MODULE -name "*.war"|egrep '.*' &>/dev/null;then
+                    find $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$M_MODULE -name "*.war" -delete
+                    echo -e "\033[1;32m清理废弃 WAR 包\033[0m"
+                  fi
+
+                  PACKAGES=$(ls $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$M_MODULE/|tr -s '\n' ' ')
+                else
+                  N_MODULE=$(find $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME/ -type f|wc -l)
+                  N_MODULE_DEL=$(find $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME/ -type f ! -name "$M_MODULE\.*"|wc -l)
+                  if [ $(find $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME/ -type f|wc -l) -gt 0 ];then
+                    [ $N_MODULE -eq $N_MODULE_DEL ] || find $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME/ -type f ! -name "$M_MODULE\.*" -delete
+                    echo $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME
+
+                    if find $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME -name "*.jar"|egrep '.*' &>/dev/null && find $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME -name "*.war"|egrep '.*' &>/dev/null;then
+                      find $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME -name "*.war" -delete
+                      echo -e "\033[1;32m清理废弃 WAR 包\033[0m"
+                    fi
+
+                    PACKAGES=$(ls $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME/|tr -s '\n' ' ')
+                  else
+                    echo $M_MODULE
+                    echo "$ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME"
+                    exit 1
+                  fi
+                fi
+              fi
+            else
+              echo $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME
+
+              if find $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME -name "*.jar"|egrep '.*' &>/dev/null && find $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME -name "*.war"|egrep '.*' &>/dev/null;then
+                find $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME -name "*.war" -delete
+                echo -e "\033[1;32m清理废弃 WAR 包\033[0m"
+              fi
+
+              PACKAGES=$(ls $ROOT_CONFIG/.package/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME/|tr -s '\n' ' ')
+            fi
+            echo -e "\033[1;33m$PACKAGES\033[0m"
+            m_deployment=0
+            m_statefulset=0
+            m_service=0
+            m_ingress=0
+            for pack in $PACKAGES
+            do
+                export NAME=${pack%.*}
+                export PKG=$(echo ${pack##*.}|tr '[a-z'] '[A-Z]')
+                OBJ=deployment
+
+                # 判断目标镜像是否存在
+                if [ -e $ROOT_CONFIG/commit/$NAME:$CI_COMMIT_SHORT_SHA ];then
+                  MSG="deploy [ $pack ] to [ $(echo $ROOT_K8S|awk -F'/' '{print $NF}')/$NS ]\n"
+                  echo -e "\033[1;35m------------------No.$NS_NUM--- $MSG \033[0m"
+                  if [ -e $ROOT_K8S/.kube/info ];then
+                    echo -e "\033[1;36m$(cat $ROOT_K8S/.kube/info)\033[0m"
+                    echo "------------------------------------------------------------------------------------------------------"
+                  fi
+
+                  # 选择基础环境镜像 $IMAGE_BASE
+                  if [ -z $IMAGE_RUN ];then
+                      if [ -e $ROOT_NS/.kube/debug ];then
+                          image=$ROOT_CONFIG/image/base-${pack##*.}-debug
+                      else
+                          image=$ROOT_CONFIG/image/base-${pack##*.}
+                      fi
+                      ( [ "$IMAGE_BUILD" == "maven:jdk8" ] || [ "$IMAGE_BUILD" == "centos:7.9.2009-maven-jdk8" ] ) && image=$ROOT_CONFIG/image/base-${pack##*.}-jdk
+                      export IMAGE_BASE=$IMAGE_REGISTRY_ROOT/base/$(cat $image)
+                  else
+                      export IMAGE_BASE=$IMAGE_REGISTRY_ROOT/base/$IMAGE_RUN
+                  fi
+
+                  # 如果强制编译CPL或者DEL不为空,那么制品容器的镜像拉取策略为 Always
+                  if [ ! -z "$CPL" ] || [ ! -z "$DEL" ] || [ -e $ROOT_CONFIG/commit/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_COMMIT_SHORT_SHA-$NAME ];then
+                      export imagePullPolicy="Always"
+                  else
+                      export imagePullPolicy="IfNotPresent"
+                  fi
+
+                  # 默认寻找该项目的 deployment,service 自定义模版,没有自定义则使用默认统一模版 (判断是否有应用分身)
+                  if [ -z $ROLE ];then
+                    for e in service
+                    do
+                      E=$(echo $e|tr '[a-z'] ['A-Z'])
+                      if [ -e $ROOT_NS/$e/.$NAME-$E.tmpl ];then
+                          TMPL=$ROOT_NS/$e/.$NAME-$E.tmpl
+                          FILE=$ROOT_NS/$e/$NAME-$E.yml
+                          m_service=1
+                      elif [ -e $ROOT_NS/$e/.$E.tmpl ];then
+                          TMPL=$ROOT_NS/$e/.$E.tmpl
+                          FILE=$ROOT_NS/$e/$NAME-$E.yml
+                      fi
+                      echo  "--- $E ------------------------------------------------------------------------------------------"
+                      [ -e $FILE ] && [ "$(cat $FILE)" = "$(envsubst < $TMPL)" ] || ( envsubst < $TMPL > $FILE && kubectl apply -f $FILE )
+                      kubectl -n $NS get $e $NAME --no-headers 2>/dev/null|tr -s ' '|grep "^$NAME " || kubectl apply -f $FILE
+                      echo -e "\033[1;36mhttp://$NAME (容器环境内部访问地址, $NS 容器环境内部之间的调用,请务必在配置中心填写该地址)\033[0m"
+                      [ $m_service -gt 0 ] && echo -e "\033[1;36m自定义 $E ($TMPL)\n\033[1;34m$(cat $FILE)\033[0m"
+                    done
+
+                    # 寻找 localtime 时区
+                    if [ -e $ROOT_NS/.kube/default_localtime ];then
+                      export LOCALTIME=$(cat $ROOT_NS/.kube/default_localtime)
+                    elif [ -e $ROOT_K8S/.kube/default_localtime ];then
+                      export LOCALTIME=$(cat $ROOT_K8S/.kube/default_localtime)
+                    else
+                      export LOCALTIME=cst
+                    fi
+
+                    # 寻找 JVM 配置参数 $Xms $Xmx $Xmn
+                    export Xms=512m
+                    export Xmx=512m
+                    export Xmn=256m
+                    if [ -e $ROOT_NS/.kube/default_jvm ];then
+                      default_app_xms=$(cat $ROOT_NS/.kube/default_jvm|awk '{print $1}')
+                      default_app_xmx=$(cat $ROOT_NS/.kube/default_jvm|awk '{print $2}')
+                      default_app_xmn=$(cat $ROOT_NS/.kube/default_jvm|awk '{print $3}')
+                      [ -n "$default_app_xms" ] && export Xms=$default_app_xms
+                      [ -n "$default_app_xmx" ] && export Xmx=$default_app_xmx
+                      [ -n "$default_app_xmn" ] && export Xmn=$default_app_xmn
+                    fi
+                    if [ -e $ROOT_NS/.kube/jvm ];then
+                      app_xms=$(cat $ROOT_NS/.kube/jvm|tr -s ' '|sed '/^$/d'|sort|uniq|awk "/^$NAME /"|tail -n 1|awk '{print $2}')
+                      app_xmx=$(cat $ROOT_NS/.kube/jvm|tr -s ' '|sed '/^$/d'|sort|uniq|awk "/^$NAME /"|tail -n 1|awk '{print $3}')
+                      app_xmn=$(cat $ROOT_NS/.kube/jvm|tr -s ' '|sed '/^$/d'|sort|uniq|awk "/^$NAME /"|tail -n 1|awk '{print $4}')
+                      [ -n "$app_xms" ] && export Xms=$app_xms
+                      [ -n "$app_xmx" ] && export Xmx=$app_xmx
+                      [ -n "$app_xmn" ] && export Xmn=$app_xmn
+                    fi
+
+                    # 寻找 REPLICAS 副本数,优先寻找 $ROOT_NS/.kube/,找不到则找全局 $ROOT_K8S/.kube/
+                    if [ -e $ROOT_NS/.kube/replicas ];then
+                      replicas=$(cat $ROOT_NS/.kube/replicas|tr -s ' '|sed '/^$/d'|sort|uniq|awk "/^$NAME /"|tail -n 1|awk '{print $NF}')
+                      if [ -n "$replicas" ] && [ $replicas -gt 0 ];then
+                        export REPLICAS=$replicas
+                      elif [ -e $ROOT_NS/.kube/default_replicas ];then
+                        export REPLICAS=$(cat $ROOT_NS/.kube/default_replicas)
+                      else
+                        export REPLICAS=1
+                      fi
+                    elif [ -e $ROOT_K8S/.kube/replicas ];then
+                      replicas=$(cat $ROOT_K8S/.kube/replicas|tr -s ' '|sed '/^$/d'|sort|uniq|awk "/^$NAME /"|tail -n 1|awk '{print $NF}')
+                      if [ -n "$replicas" ] && [ $replicas -gt 0 ];then
+                        export REPLICAS=$replicas
+                      elif [ -e $ROOT_K8S/.kube/default_replicas ];then
+                        export REPLICAS=$(cat $ROOT_K8S/.kube/default_replicas)
+                      else
+                        export REPLICAS=1
+                      fi
+                    else
+                      export REPLICAS=1
+                    fi
+
+                    # 先匹配有状态部署,再匹配无状态部署
+                    if find $ROOT_NS/statefulset/ -name $pack|egrep '.*' &>/dev/null;then
+                      OBJ=statefulset
+                      for e in statefulset
+                      do
+                        E=$(echo $e|tr '[a-z'] ['A-Z'])
+                        if [ -e $ROOT_NS/$e/.$NAME-$PKG-$E.tmpl ];then
+                            TMPL=$ROOT_NS/$e/.$NAME-$PKG-$E.tmpl
+                            FILE=$ROOT_NS/$e/$NAME-$PKG-$E.yml
+                            m_statefulset=1
+                        elif [ -e $ROOT_NS/$e/.$PKG-$E.tmpl ];then
+                            TMPL=$ROOT_NS/$e/.$PKG-$E.tmpl
+                            FILE=$ROOT_NS/$e/$NAME-$PKG-$E.yml
+                        fi
+                        echo  "--- $E --------------------------------------------------------------------------------------"
+                        echo -e "\033[1;36m镜像: $NAME:$CI_COMMIT_SHORT_SHA\033[0m"
+                        echo -e "\033[1;36m时区: $LOCALTIME ($ROOT_NS/.kube/default_localtime)\033[0m"
+                        echo -e "\033[1;36m副本数: $REPLICAS (如需自定义,请联系SRE更新 $ROOT_NS/.kube/replicas)\033[0m"
+                        echo -e "\033[1;36mJVM 配置参数: -Xms$Xms -Xmx$Xmx -Xmn$Xmn (如需自定义,请联系SRE更新 $ROOT_NS/.kube/jvm)\033[0m"
+                        [ -e $FILE ] && [ "$(cat $FILE)" = "$(envsubst < $TMPL)" ] && export DEPLOY=0 || export DEPLOY=1
+                        [ -e $FILE ] && [ "$(cat $FILE)" = "$(envsubst < $TMPL)" ] || ( envsubst < $TMPL > $FILE && kubectl apply -f $FILE && sleep 7 )
+                        kubectl -n $NS get $e $NAME --no-headers 2>/dev/null | grep "^$NAME " || kubectl apply -f $FILE
+                        [ -e $ROOT_CONFIG/commit/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_COMMIT_SHORT_SHA-$NAME ] && kubectl apply -f $FILE
+
+                        # 如果有新镜像,更新现有资源的容器镜像,并重启确保此次镜像更新(如果 yml 内容不变化则执行)
+                        [ $DEPLOY -eq 0 ] && [ -e $ROOT_CONFIG/commit/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_COMMIT_SHORT_SHA-$NAME ] && kubectl -n $NS set image $e/$NAME busybox=$IMAGE_REGISTRY/$NAME:$CI_COMMIT_SHORT_SHA && kubectl -n $NS rollout restart $e $NAME
+                        [ $m_statefulset -gt 0 ] && echo -e "\033[1;36m自定义 $E ($TMPL)\n\033[1;34m$(cat $FILE)\033[0m"
+
+                      done
+                    else
+                      for e in deployment
+                      do
+                        E=$(echo $e|tr '[a-z'] ['A-Z'])
+                        [ -n "$springboot" ] && [ "$PKG" == "JAR" ] && PKG=SPRINGBOOT
+                        if [ -e $ROOT_NS/$e/.$NAME-$PKG-$E.tmpl ];then
+                            TMPL=$ROOT_NS/$e/.$NAME-$PKG-$E.tmpl
+                            FILE=$ROOT_NS/$e/$NAME-$PKG-$E.yml
+                            m_deployment=1
+                        elif [ -e $ROOT_NS/$e/.$PKG-$E.tmpl ];then
+                            TMPL=$ROOT_NS/$e/.$PKG-$E.tmpl
+                            FILE=$ROOT_NS/$e/$NAME-$PKG-$E.yml
+                        fi
+                        echo  "--- $E ---------------------------------------------------------------------------------------"
+                        echo -e "\033[1;36m镜像: $NAME:$CI_COMMIT_SHORT_SHA\033[0m"
+                        echo -e "\033[1;36m时区: $LOCALTIME ($ROOT_NS/.kube/default_localtime)\033[0m"
+                        echo -e "\033[1;36m副本数: $REPLICAS (如需自定义,请联系SRE更新 $ROOT_NS/.kube/replicas)\033[0m"
+                        echo -e "\033[1;36mJVM 配置参数: -Xms$Xms -Xmx$Xmx -Xmn$Xmn (如需自定义,请联系SRE更新 $ROOT_NS/.kube/jvm)\033[0m"
+                        [ -e $FILE ] && [ "$(cat $FILE)" = "$(envsubst < $TMPL)" ] && export DEPLOY=0 || export DEPLOY=1
+                        [ -e $FILE ] && [ "$(cat $FILE)" = "$(envsubst < $TMPL)" ] || ( envsubst < $TMPL > $FILE && kubectl apply -f $FILE && sleep 7 )
+                        kubectl -n $NS get $e $NAME --no-headers 2>/dev/null | grep "^$NAME " || kubectl apply -f $FILE
+                        [ -e $ROOT_CONFIG/commit/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_COMMIT_SHORT_SHA-$NAME ] && kubectl apply -f $FILE
+
+                        # 如果有新镜像,更新现有资源的容器镜像,并重启确保此次镜像更新(如果 yml 内容不变化则执行)
+                        [ $DEPLOY -eq 0 ] && [ -e $ROOT_CONFIG/commit/$CI_PROJECT_NAMESPACE-$CI_PROJECT_NAME-$CI_COMMIT_SHORT_SHA-$NAME ] && kubectl -n $NS set image $e/$NAME busybox=$IMAGE_REGISTRY/$NAME:$CI_COMMIT_SHORT_SHA && kubectl -n $NS rollout restart $e $NAME
+                        [ $m_deployment -gt 0 ] && echo -e "\033[1;36m自定义 $E ($TMPL)\n\033[1;34m$(cat $FILE)\033[0m"
+
+                      done
+                    fi
+
+                    # 根据 $NAME $HOST/$LOC 清单文件自动创建 Ingress
+                    E=INGRESS
+                    if [ -e $ROOT_NS/ingress/.host ];then
+                      URL=$(cat $ROOT_NS/ingress/.host|tr -s ' '|sed '/^$/d'|sort|uniq|awk "/^$NAME /"|tail -n 1|awk '{print $NF}'|awk -F'//' '{print $NF}')
+                      export HOST=$(echo $URL|awk -F'/' '{print $1}')
+                      if [ -n "$HOST" ];then
+                          export TLDS=$(echo "$HOST"|awk -F"." '{print $(NF-1)"."$NF}')
+                          export LOC=$(echo $URL|awk -F"$TLDS/" '{print $2}')
+
+                          [ -e $ROOT_NS/.kube/acl_ingress ] && acl=$(cat $ROOT_NS/.kube/acl_ingress|tr -s ' '|sed '/^$/d'|sort|uniq|awk "/^$NAME$/"|tail -n 1|awk '{print $1}') || acl=""
+                          if [ -n "$acl" ];then
+                            [ -e $ROOT_NS/ingress/.$NAME-INGRESS.tmpl ] && TMPL=$ROOT_NS/ingress/.$NAME-INGRESS.tmpl && m_ingress=1 || TMPL=$ROOT_NS/ingress/.INGRESS-ACL.tmpl
+                          else
+                            [ -e $ROOT_NS/ingress/.$NAME-INGRESS.tmpl ] && TMPL=$ROOT_NS/ingress/.$NAME-INGRESS.tmpl && m_ingress=1 || TMPL=$ROOT_NS/ingress/.INGRESS.tmpl
+                          fi
+
+                          FILE=$ROOT_NS/ingress/$NAME-INGRESS.yml
+                          echo '--- INGRESS ------------------------------------------------------------------------------------------'
+                          if [ -e $FILE ];then
+                              [ "$(cat $FILE)" = "$(envsubst < $TMPL)" ] || ( envsubst < $TMPL > $FILE;kubectl apply -f $FILE )
+                          else
+                              [ -n "$HOST" ] && [ -n "$TLDS" ] && ( envsubst < $TMPL > $FILE;kubectl apply -f $FILE;sleep 7 )
+                          fi
+                          [ -e $FILE ] && ( kubectl -n $NS get ingress $NAME --no-headers 2>/dev/null|tr -s ' '|grep "^$NAME " || kubectl apply -f $FILE )
+                          export ALL_HOST=$(kubectl -n $NS get ingress $NAME --no-headers -o custom-columns=HOSTS:.spec.rules[*].host 2>/dev/null|sed 's/,/\n/g'|sed 's#^#https://#g'|sort -u)
+                          [ -n "$acl" ] && echo -e "\033[1;36mACL: 含有访问控制白名单 ($ROOT_NS/.kube/acl_ingress)\033[0m"
+                          echo -e "\033[1;36m$ALL_HOST (外部访问地址)\033[0m"
+                          [ $m_ingress -gt 0 ] && echo -e "\033[1;36m自定义 $E ($TMPL)\n\033[1;34m$(cat $FILE)\033[0m"
+                      fi
+                    fi
+
+                    echo '--- POD ----------------------------------------------------------------------------------------------'
+                    kubectl -n $NS get pods -l app=$NAME --sort-by=.metadata.creationTimestamp --no-headers 2>/dev/null|grep "^$NAME-" || kubectl -n $NS get pods --sort-by=.metadata.creationTimestamp --no-headers 2>/dev/null|grep "^$NAME-" || kubectl apply -f $FILE
+                    echo -e "\033[1;35m------------------\033[0m"
+                  else
+                    for e in deployment
+                    do
+                      E=$(echo $e|tr '[a-z'] ['A-Z'])
+                      if [ -e $ROOT_NS/$e/.$NAME-$ROLE-$PKG-$E.tmpl ];then
+                          TMPL=$ROOT_NS/$e/.$NAME-$ROLE-$PKG-$E.tmpl
+                          FILE=$ROOT_NS/$e/$NAME-$ROLE-$PKG-$E.yml
+                      fi
+                      echo  "--- $E ---------------------------------------------------------------------------------------"
+                      [ -e $FILE ] && [ "$(cat $FILE)" = "$(envsubst < $TMPL)" ] || ( envsubst < $TMPL > $FILE && kubectl apply -f $FILE )
+                      kubectl -n $NS get $e $NAME-$ROLE --no-headers 2>/dev/null | grep "^$NAME-$ROLE " || kubectl apply -f $FILE
+                    done
+                  fi
+                else
+                  continue
+                fi
+            done
+            echo "======================================================================================================"
+
+            # 检测新 Pod 是否成功上线,发布成功则系统统计/消息通知,失败则输出日志后退出
+            if [ -e $ROOT_NS/.prod ] || [ -n "$ROLE" ] || [ $(expr index "$NNS" " ") -eq 0 ];then
+              source $ROOT_CONFIG/bin/status.sh
+            else
+              source $ROOT_CONFIG/bin/status.sh &
+              mkdir -p $ROOT_CONFIG/.state/$CI_PIPELINE_ID
+              jobs -p|head -n 1 > $ROOT_CONFIG/.state/$CI_PIPELINE_ID/$NS
+              echo -n -e "\033[1;33m$NS ";jobs -p|head -n 1;echo -n -e "\033[0m"
+              parallelism=1
+            fi
+
+            # 联动更新 prometheus 业务监控数据采集对象配置文件
+            if [ -e $ROOT_K8S/.kube/prometheus ];then
+              envsubst '{{$IMAGE_REGISTRY_ROOT,$ROOT_K8S,$NS,$SALT}}' < $ROOT_K8S/base-ops/base/prometheus/config-update-job.tmpl | kubectl delete -f - || echo ok
+              envsubst '{{$IMAGE_REGISTRY_ROOT,$ROOT_K8S,$NS,$SALT}}' < $ROOT_K8S/base-ops/base/prometheus/config-update-job.tmpl | kubectl apply -f - || echo ok
+              envsubst '{{$IMAGE_REGISTRY_ROOT,$ROOT_K8S,$NS,$SALT}}' < $ROOT_K8S/base-ops/base/prometheus/config-cronjob.tmpl | kubectl apply -f - || echo ok
+              echo -e "\033[1;36m$(cat $ROOT_K8S/.kube/prometheus)\033[0m"
+            fi
+          done
+      done
+      echo "======================================================================================================"
+      echo -e "\033[1;35m$NNS\033[0m"
+      echo -e "\033[1;33m$PACKAGES\033[0m"
+
+      if [ $parallelism -gt 0 ] && [ $(expr index "$NNS" " ") -gt 0 ];then
+        echo -e "\033[1;33m并行发布单元应用自检状态\033[0m"
+        flag=0
+        status0=""
+        status1=""
+        for pid in $(jobs -p)
+        do
+          status=0
+          wait $pid || status=1
+          for NS in $NNS
+          do
+            if [ "$pid" = "$(cat $ROOT_CONFIG/.state/$CI_PIPELINE_ID/$NS 2>/dev/null)" ];then
+              if [ "$status" = "0" ];then
+                echo -e "\033[1;32m$NS   ✅ \033[0m"
+                status0=${status0}"$NS Success\n"
+              else
+                echo -e "\033[1;31m$NS   ❌\033[0m"
+                status1=${status1}"$NS Failure\n"
+                flag=1
+              fi
+            else
+              usleep 1
+            fi
+          done
+        done
+        echo "--------------------------------"
+        echo -e "\033[1;32m$status0\033[0m"|column -t
+        echo -e "\033[1;31m$status1\033[0m"|column -t
+        echo -e "\033[0m"
+        echo "--------------------------------"
+        if [ "$flag" = "0" ];then
+          exit 0
+        else
+          msg="看开点兄弟,程序员才是生产力,所以应用出了问题,那么责任一定在于你"
+          echo -e "\033[1;31m$msg\033[0m"
+          exit 1
+        fi
+      fi
+variables:
+  DOCKER_HOST: tcp://127.0.0.1:2375 # docker 服务的配置,用于支持docker build等操作
+  DOCKER_TLS_CERTDIR: "" # 启动DOCKER服务的参数,必须存在
+  IMAGE_BUILD: 'maven:3.6.3-openjdk-8'  # 如果编译出现javafx找不到的问题,需要更换为 centos:7.9.2009-maven-jdk8 / maven:3.6.3-openjdk-8
+  MAVEN_PL: "" # git模块, 例:-pl {gitmodule}
+  TEST_SKIP: "-Dmaven.test.skip=true" # maven命令的跳过测试参数,为空时执行单元测试
+  SCAN2SONAR: "" # 代码扫描后并上传到Sonar
+  DEPENDENCY_CHECK: "" # 代码漏洞检测
+  ROOT_CONFIG: /cache/sys # 约定的 CI 过程需要的一些变量文件存储路径
+  IMAGE_REGISTRY_SERVER: "registry-vpc.cn-hangzhou.cr.aliyuncs.com"  # 这是主镜像仓库地址,也就是说每个项目编译/推送镜像的唯一地址;根据镜像仓库的配置,主仓库会同步到各个地域的从仓库
+  IMAGE_REGISTRY_NAMESPACE: "app" # 主仓库默认项目镜像仓库空间
+  SALT: "xxxxxx" # secret_kubeconfig 解密 salt ,实际上该字符串只需要配置在 gitlab 全局变量即可
+  LANGUAGE: "JAVA"

@@ -21,7 +21,7 @@ public class MyWebSocketHandler extends TextWebSocketHandler {
     /**
      * 存放Session集合，方便推送消息
      */
-    private static ConcurrentHashMap<String, WebSocketSession> webSocketSessionMaps = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, WebSocketSession> webSocketSessionMaps = new ConcurrentHashMap<>();
 
     // 监听：连接开启
     @Override
@@ -30,7 +30,6 @@ public class MyWebSocketHandler extends TextWebSocketHandler {
         // put到集合，方便后续操作
         String userId = session.getAttributes().get("userId").toString();
         webSocketSessionMaps.put(USER_ID + userId, session);
-
 
         // 给个提示
         String tips = "Web-Socket 连接成功，sid=" + session.getId() + "，userId=" + userId;

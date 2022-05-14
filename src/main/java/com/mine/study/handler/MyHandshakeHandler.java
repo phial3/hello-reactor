@@ -10,10 +10,11 @@ import java.util.Map;
 
 @Slf4j
 public class MyHandshakeHandler extends DefaultHandshakeHandler {
+
     @Override
-    protected Principal determineUser(ServerHttpRequest request, WebSocketHandler wsHandler, Map<String, Object> attributes) {
+    protected Principal determineUser(ServerHttpRequest request, WebSocketHandler handler, Map<String, Object> attributes) {
         log.info("--websocket的http连接握手之后--");
         //设置认证用户
-        return (Principal) attributes.get("user");
+        return (Principal) attributes.get("userId");
     }
 }

@@ -23,6 +23,8 @@
         <project.reporting.outputEncoding>${project.encoding}</project.reporting.outputEncoding>
 
         <lombok.version>1.18.24</lombok.version>
+        <hutool.version>5.7.22</hutool.version>
+        <sa-token.version>1.30.0</sa-token.version>
     </properties>
 
     <dependencies>
@@ -57,14 +59,14 @@
         <dependency>
             <groupId>cn.hutool</groupId>
             <artifactId>hutool-all</artifactId>
-            <version>5.7.22</version>
+            <version>${hutool.version}</version>
         </dependency>
 
         <!-- Sa-Token 权限认证, 在线文档：http://sa-token.dev33.cn/ -->
         <dependency>
             <groupId>cn.dev33</groupId>
             <artifactId>sa-token-spring-boot-starter</artifactId>
-            <version>1.29.0</version>
+            <version>${sa-token.version}</version>
         </dependency>
     </dependencies>
 
