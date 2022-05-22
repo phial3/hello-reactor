@@ -1,0 +1,35 @@
+server:
+  port: 8090
+  monitor:
+    port: 6899
+  netty:
+    port: 8091
+
+application:
+  name: "@maven.project.name@"
+  version: "@maven.project.version@"
+  mavenProfile: "@maven.profile.name@"
+  build-version: "2020.01"
+
+# Logging Config
+logging:
+  file:
+    path: "${user.home}/export/logs/${application.name}/${application.mavenProfile}"
+    name: "log-info"
+  config: classpath:logback/logback-${spring.profiles.active:dev}.xml
+
+app-config:
+  buildVersion: "2020.08.21"
+  env: ${spring.profiles.active::DEFAULT}
+  appName: ${application.name}
+  domain: "system.com"
+  privateKey: "MIICdwIBADANBgkqhkiG9w0BAQEFAASCAmEwggJdAgEAAoGBAJ/FK3LyqqZOfRnNt8FEcupLVW+eGXkibvjLaGb6j/azuArpqJuEk+ZaOxJ/eiVETlDA6ixxCb9F/4FrgBrPaeq29zSiyACkU3XsEhKeBOfnlyNsLT7MvBf7O+s8hD8lp1G1Yh3MSWv1SVxZr0Kv0ssY1+nsRu4eSnNz8JieS1NpAgMBAAECgYAtYhyNclD3HKR8h+sCgycBVpTWN9qUhitvkJf/aH0sXrCQqP6z7lz0ufy9rGhN3bFBTws1xIY4RvHlGVwyQWicR/sGffZLyDN3Lh4mXfWM6lZZ8CWBZQOaedvrr6480VyW8kj045eGvGI0ayXxwVtpoJ9A1u8dpaikIdyFbP7HgQJBAOFanxkoHegNk8yi7rUIHVF7b6X0ptaxsGUGIxbImTNF29Qt+Ua2yak1yIYapeQtCzgIAd7x84gzHr2DEi416f0CQQC1f1d6DAEeooXM2eavuhWBtf3VaRaNIS8vXr2JYNNjPA1F3edm7bFQrx/ox8+hjSz0mjM3P1pzrj50oZIwN+TdAkEA0lSyidhXkW6atDSed3jLZHHBEzP1RA00hhXkSi+QTbq2IqOGNeoE7lm0fvYAP6eLARD4Lg3FLyoHVvouzdKkQQJBAJ3Uih6hF8wrKs2UY85GtPMibwVJqIm75Mt9yLcRk2HFVAmAyf0xEDQIxmfocj+bhA+FlKojlqXoTXmhE36I7KUCQGtOuBpC1M7J0L5kClJalrQShHiCfV5N+PxtRxfxmbhZFY3k2J5zm5yRaGAKUmhZrZjyuXSeL2uv62za2OMqwpE="
+  publicKey: "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCfxSty8qqmTn0ZzbfBRHLqS1Vvnhl5Im74y2hm+o/2s7gK6aibhJPmWjsSf3olRE5QwOoscQm/Rf+Ba4Aaz2nqtvc0osgApFN17BISngTn55cjbC0+zLwX+zvrPIQ/JadRtWIdzElr9UlcWa9Cr9LLGNfp7EbuHkpzc/CYnktTaQIDAQAB"
+  tokenCookieName: "token"
+  systemName: "system"
+  uploadDir: "/data/upload"
+  aesSecretKey: "@DbvPs{6q;:G1v1:&Ps&(y9C+=3`&vw_"
+  aesIv: "PMq(ph,+ckL]IJp6"
+  apiVerifySecretKey: ".v7t6kIY;v$JIRJ!3[4eerYR'>(NM.<I"
+  webServerPort: ${server.port}
+

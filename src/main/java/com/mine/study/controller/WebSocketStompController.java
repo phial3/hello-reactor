@@ -17,7 +17,7 @@ import javax.annotation.Resource;
 public class WebSocketStompController {
 
     @Resource
-    MyWebSocketService myWebSocketService;
+    private MyWebSocketService myWebSocketService;
 
     /**
      * 发送信息 stomp

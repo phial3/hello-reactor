@@ -38,31 +38,30 @@ public class SteelyardServerHandler extends SimpleChannelInboundHandler<String> 
     }
 
     @Override
-    protected void channelRead0(ChannelHandlerContext context, String s) throws Exception {
-        LOGGER.info("收到物位仪数据<----传感器：" + s);
-//        if (s != null && !"".equals(s)) {
-//            try {
-////                processMsg(s,context);
-                context.writeAndFlush(s);
-//            }catch (Exception e){
-//                LOGGER.error("处理数据错误：",e);
-//                e.printStackTrace();
-//            }
-//        }
+    protected void channelRead0(ChannelHandlerContext context, String data) throws Exception {
+        LOGGER.info("收到物位仪数据<----传感器：" + data);
+        //        if (s != null && !"".equals(data)) {
+        //            try {
+        //                processMsg(data, context);
+        context.writeAndFlush(data);
+        //            } catch (Exception e) {
+        //                LOGGER.error("处理数据错误：", e);
+        //                e.printStackTrace();
+        //            }
+        //        }
 
     }
 
 
-
-    public void processMsg(String msg,ChannelHandlerContext context){
-        if(SteelyardUtil.isPackage(msg)){
+    public void processMsg(String msg, ChannelHandlerContext context) {
+        if (SteelyardUtil.isPackage(msg)) {
             String id = SteelyardUtil.getId(msg);
             String op = SteelyardUtil.getOperate(msg);
             LOGGER.info("获取操作命令：" + op);
-            switch (op){
+            switch (op) {
                 case SteelyardUtil.REGISTER:
                     String sent = SteelyardUtil.allowAck(id);
-                    if(!"".equals(sent)){
+                    if (!"".equals(sent)) {
                         //LOGGER.info("发送Register数据---->吊秤：" + sent);
                         //ByteBuf echo = Unpooled.copiedBuffer(sent.getBytes());
                         context.writeAndFlush(sent);
@@ -85,7 +84,7 @@ public class SteelyardServerHandler extends SimpleChannelInboundHandler<String> 
                     break;
                 case SteelyardUtil.BAT:
                     String bat = SteelyardUtil.batAck(id);
-                    if(!"".equals(bat)){
+                    if (!"".equals(bat)) {
                         //LOGGER.info("发送Bat数据---->吊秤：" + bat);
                         ByteBuf echo = Unpooled.copiedBuffer(bat.getBytes());
                         context.writeAndFlush(bat);
@@ -104,9 +103,9 @@ public class SteelyardServerHandler extends SimpleChannelInboundHandler<String> 
 
             }
             //第一次上线注册
-            if(!registMap.containsKey(context.channel())){
-                registMap.put(context.channel(),id);
-                String mode = SteelyardUtil.setMode(id,3,"00010","015","010");
+            if (!registMap.containsKey(context.channel())) {
+                registMap.put(context.channel(), id);
+                String mode = SteelyardUtil.setMode(id, 3, "00010", "015", "010");
                 //LOGGER.info("发送Mode数据---->吊秤：" + mode);
                 ByteBuf echo = Unpooled.copiedBuffer(mode.getBytes());
                 context.writeAndFlush(mode);
@@ -150,14 +149,13 @@ public class SteelyardServerHandler extends SimpleChannelInboundHandler<String> 
 
     @Override
     public void channelUnregistered(ChannelHandlerContext ctx) throws Exception {
-        LOGGER.info("channelUnregistered channel取消绑定" );
+        LOGGER.info("channelUnregistered channel取消绑定");
         registMap.remove(ctx.channel());
         super.channelUnregistered(ctx);
     }
 
     @Override
-    public void channelInactive(ChannelHandlerContext ctx)
-            throws Exception {
+    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
         LOGGER.info("channelInactive: channel被关闭");
         super.channelInactive(ctx);
     }

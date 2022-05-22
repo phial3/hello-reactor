@@ -2,9 +2,8 @@
 ############################################################
 # Stop application
 #
-# @author mayanjun
-# @Email mayanjun@jd.com
-# @ERP mayanjun3
+# @author root
+# @Email root@exam.com
 ############################################################
 
 # init app

@@ -2,15 +2,14 @@
 ############################################################
 # Deploy application
 # Copy new jar file and backup jar file
-# @author mayanjun
-# @Email mayanjun@jd.com
-# @ERP mayanjun3
+# @author root
+# @Email root@exam.com
 ############################################################
 
 # init app
 
 # custom scp home
-SCP_HOME="/Users/mayanjun/Desktop/dddddddddd/scp"
+SCP_HOME="/Users/root/Desktop/dddddddddd/scp"
 
 BIN_DIR="$(cd `dirname $0`; pwd)"
 APP_DIR="`dirname $BIN_DIR`"

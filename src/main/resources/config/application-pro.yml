@@ -1,0 +1,4 @@
+# Production Environment
+logging:
+  file:
+    path: "/export/Logs/${application.name}/${application.mavenProfile}"

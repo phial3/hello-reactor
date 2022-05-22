@@ -68,6 +68,12 @@
             <artifactId>sa-token-spring-boot-starter</artifactId>
             <version>${sa-token.version}</version>
         </dependency>
+
+        <dependency>
+            <groupId>io.airlift</groupId>
+            <artifactId>airline</artifactId>
+            <version>0.9</version>
+        </dependency>
     </dependencies>
 
     <build>

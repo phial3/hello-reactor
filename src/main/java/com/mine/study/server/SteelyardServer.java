@@ -35,7 +35,7 @@ public class SteelyardServer implements CommandLineRunner, DisposableBean {
     private ChannelFuture cf;
     private TaskScheduler taskScheduler;
 
-    @Value("${server.port}")
+    @Value("${server.netty.port}")
     private int serverPort;
 
     public SteelyardServer(TaskScheduler taskScheduler) {

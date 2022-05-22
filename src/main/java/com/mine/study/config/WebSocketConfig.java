@@ -1,6 +1,5 @@
 package com.mine.study.config;
 
-
 import com.mine.study.handler.MyHandshakeHandler;
 import com.mine.study.handler.MyWebSocketHandler;
 import com.mine.study.interceptor.MyWebSocketInterceptor;
@@ -18,7 +17,7 @@ import java.util.List;
 
 @Configuration
 @EnableWebSocket
-@EnableWebSocketMessageBroker
+@EnableWebSocketMessageBroker //启用STOMP消息, 表明这个配置类不仅配置了WebSocket， 还配置了基于代理的STOMP消息
 public class WebSocketConfig implements WebSocketMessageBrokerConfigurer, WebSocketConfigurer {
 
     @Bean
@@ -72,9 +71,10 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer, WebSoc
         // 线程池线程数，心跳连接开线程
         taskScheduler.setPoolSize(1);
         // 线程名前缀
-        taskScheduler.setThreadNamePrefix("websocket-heartbeat-thread-");
+        taskScheduler.setThreadNamePrefix("websocket-heartbeat-prefix-");
         // 初始化
         taskScheduler.initialize();
+        taskScheduler.setBeanName("websocket-heartbeat-thread");
         // 设置广播节点
         registry.enableSimpleBroker("/ad", "/device", "/pay", "/data", "/warn", "/alone")
                 .setHeartbeatValue(new long[]{10000, 10000})
