@@ -37,6 +37,37 @@
 >1. 大数据的传输可以分片传输，不用考虑到数据大小导致的长度标志位不足够的情况。
 >
 >2. 和http的chunk一样，可以边生成数据边传递消息，即提高传输效率。
+>
+>
+
+### 目前最常见的两种集成 WebSocket 方式：
+
+1. Java 原生版J2EE：javax.websocket.Session
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-web</artifactId>
+</dependency>
+```
+
+2. Spring 封装版：WebSocketSession
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-websocket</artifactId>
+</dependency>
+```
+
+3. 自定义方式Netty实现
+```xml
+<dependency>
+    <groupId>io.netty</groupId>
+    <artifactId>netty-all</artifactId>
+    <version>4.1.77.Final</version>
+</dependency>
+```
+
+> 参考示例: https://gitee.com/dromara/sa-token/tree/dev/sa-token-demo
 
 ## 2. websocket简介
 websocket是html5提出的一个协议规范，参考rfc6455。
@@ -252,13 +283,7 @@ Opcode中的值代表着这个帧的作用(0-7:数据帧 8-F:控制帧)，0x8代
 
 经过 **TCP连接 → 握手协议 → 数据传输 → 连接结束** 就基本走完一个websocket流程了。
 
-### 目前最常见的两种集成 WebSocket 方式：
 
-1. Java 原生版：javax.websocket.Session
-
-2. Spring 封装版：WebSocketSession
-
-> 参考示例: https://gitee.com/dromara/sa-token/tree/dev/sa-token-demo
 
 
 
